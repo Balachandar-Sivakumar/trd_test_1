@@ -1,0 +1,1 @@
+timestamp,symbol,side,signal_candle,entry,stop,target,atr,tod_rvol,opening_rvol,vwap,ema9,ema21,status,entry_time,exit_time,exit_price,gross_R,cost,net_R
