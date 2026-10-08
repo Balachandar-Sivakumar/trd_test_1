@@ -14,9 +14,10 @@ import {
   Timer,
   ChevronLeft,
   ChevronRight,
-  LineChart
+  LineChart,
+  RefreshCw
 } from 'lucide-react';
-import { fetchBacktest } from '../services/api';
+import { fetchBacktest, fetchBacktestStatus, refreshBacktest } from '../services/api';
 
 export default function BacktestView({ timeframe, setTimeframe, onSelectStock }) {
   const [data, setData] = useState(null);
@@ -27,11 +28,29 @@ export default function BacktestView({ timeframe, setTimeframe, onSelectStock })
   const [statusFilter, setStatusFilter] = useState('ALL');
   const [currentPage, setCurrentPage] = useState(1);
   const [hoveredTrade, setHoveredTrade] = useState(null);
+  const [refreshing, setRefreshing] = useState(false);
   const pageSize = 25;
 
   useEffect(() => {
     loadBacktestData(timeframe);
   }, [timeframe]);
+
+  // While the server regenerates the backtest, poll its status and reload when done
+  useEffect(() => {
+    if (!refreshing) return;
+    const timer = setInterval(async () => {
+      try {
+        const st = await fetchBacktestStatus();
+        if (st.running) return;
+        setRefreshing(false);
+        if (st.last_error) setError(`Backtest refresh failed: ${st.last_error}`);
+        else loadBacktestData(timeframe);
+      } catch (e) {
+        // keep polling
+      }
+    }, 5000);
+    return () => clearInterval(timer);
+  }, [refreshing, timeframe]);
 
   async function loadBacktestData(tf) {
     try {
@@ -40,10 +59,22 @@ export default function BacktestView({ timeframe, setTimeframe, onSelectStock })
       const res = await fetchBacktest(tf);
       setData(res);
       setCurrentPage(1);
+      if (res.meta?.running) setRefreshing(true);
     } catch (err) {
+      const st = await fetchBacktestStatus().catch(() => null);
+      if (st?.running) setRefreshing(true);
       setError(err.message);
     } finally {
       setLoading(false);
+    }
+  }
+
+  async function handleRefresh() {
+    try {
+      await refreshBacktest();
+      setRefreshing(true);
+    } catch (err) {
+      setError(err.message);
     }
   }
 
@@ -52,6 +83,15 @@ export default function BacktestView({ timeframe, setTimeframe, onSelectStock })
       <div className="flex flex-col items-center justify-center py-20">
         <div className="h-10 w-10 border-4 border-emerald-500 border-t-transparent rounded-full animate-spin mb-4" />
         <p className="text-slate-400 text-sm">Loading {timeframe}-minute backtest analytics...</p>
+      </div>
+    );
+  }
+
+  if (refreshing && (error || !data)) {
+    return (
+      <div className="flex flex-col items-center justify-center py-20">
+        <RefreshCw className="h-10 w-10 text-emerald-500 animate-spin mb-4" />
+        <p className="text-slate-400 text-sm">Generating backtest from the latest market data...</p>
       </div>
     );
   }
@@ -72,7 +112,7 @@ export default function BacktestView({ timeframe, setTimeframe, onSelectStock })
     );
   }
 
-  const { summary, equity_curve, trades, by_symbol } = data;
+  const { summary, equity_curve, trades, by_symbol, meta = {} } = data;
 
   // Filter trades
   let filteredTrades = trades || [];
@@ -120,7 +160,21 @@ export default function BacktestView({ timeframe, setTimeframe, onSelectStock })
             </span>
           </h2>
           <p className="text-xs text-slate-400 mt-0.5">
-            Evaluated across 50 NIFTY constituents over {summary.days} trading days (~60 calendar days).
+            {meta.symbols ?? '–'} NIFTY stocks • trades on {summary.days} days • data {meta.data_from ?? '–'} → {meta.data_to ?? '–'} ({meta.sessions ?? '–'} sessions)
+          </p>
+          <p className="text-[11px] text-slate-500 mt-0.5 flex items-center gap-2">
+            <span>
+              {refreshing ? 'Updating with latest data...' : `Last updated ${meta.updated_at ?? 'unknown'} IST • auto-refreshes daily after market close`}
+            </span>
+            <button
+              onClick={handleRefresh}
+              disabled={refreshing}
+              title="Re-download data and re-run the backtest"
+              className="inline-flex items-center gap-1 px-2 py-0.5 rounded border border-slate-700 text-slate-300 hover:text-white hover:bg-slate-800 disabled:opacity-50"
+            >
+              <RefreshCw className={`h-3 w-3 ${refreshing ? 'animate-spin' : ''}`} />
+              Refresh
+            </button>
           </p>
         </div>
 

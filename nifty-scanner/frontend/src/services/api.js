@@ -62,3 +62,18 @@ export async function fetchHistory() {
   if (!res.ok) throw new Error('Failed to fetch history logs');
   return res.json();
 }
+
+export async function fetchBacktestStatus() {
+  const res = await fetch(`${API_BASE}/backtest/status`);
+  if (!res.ok) throw new Error('Failed to fetch backtest status');
+  return res.json();
+}
+
+export async function refreshBacktest() {
+  const res = await fetch(`${API_BASE}/backtest/refresh`, { method: 'POST' });
+  if (!res.ok) {
+    const errorData = await res.json().catch(() => ({}));
+    throw new Error(errorData.detail || 'Backtest refresh failed');
+  }
+  return res.json();
+}

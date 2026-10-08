@@ -27,6 +27,7 @@ import pandas as pd
 
 from core import IST, PARAMS, TFS, build, checks, hhmm, opening_rvol, run_day, session
 from scanner import universe, fetch_5m, load_all, read_tf, HERE
+from backtest import META as BT_META, SESSION_DONE, run_all as run_backtest_all
 
 app = FastAPI(title="NIFTY 50 Breakout Scanner API", version="1.1.0")
 
@@ -46,6 +47,9 @@ _is_scanning: bool = False
 _scan_lock = threading.Lock()
 _bg_thread = None
 _bg_stop_event = threading.Event()
+_bt_lock = threading.Lock()
+_bt_state: Dict[str, Any] = {"running": False, "last_error": None, "last_attempt": 0.0}
+BT_RETRY_SECS = 1800    # wait this long before retrying a failed daily backtest
 
 
 def clean_float(val: Any, nd: int = 2) -> Optional[float]:
@@ -465,12 +469,78 @@ def bg_scanner_loop():
             time.sleep(10)
 
 
+# Daily Backtest Refresh
+def last_closed_session(now: datetime) -> date:
+    """Most recent weekday whose session is complete in the feed (holidays are tolerated, see backtest_due)."""
+    d = now.date()
+    if now.weekday() < 5 and now.hour * 100 + now.minute >= SESSION_DONE:
+        return d
+    d -= timedelta(days=1)
+    while d.weekday() >= 5:
+        d -= timedelta(days=1)
+    return d
+
+
+def read_bt_meta() -> Dict[str, Any]:
+    try:
+        with open(BT_META) as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def backtest_due(now: datetime) -> bool:
+    # session_target is recorded per run, so a holiday triggers one run and no retries
+    csvs_ok = all(os.path.exists(os.path.join(HERE, f"backtest_tf{tf}.csv")) for tf in TFS)
+    if csvs_ok and read_bt_meta().get("session_target") == str(last_closed_session(now)):
+        return False
+    if _bt_state["last_error"] and time.time() - _bt_state["last_attempt"] < BT_RETRY_SECS:
+        return False
+    return True
+
+
+def run_backtest_job() -> bool:
+    """Refresh backtest data and results. Returns False if a run is already in progress."""
+    if not _bt_lock.acquire(blocking=False):
+        return False
+    _bt_state.update(running=True, last_attempt=time.time())
+    try:
+        target = str(last_closed_session(datetime.now(IST)))
+        print(f"[Backtest] Refreshing data and results (session {target})...")
+        _, meta = run_backtest_all(refresh=True, extra={"session_target": target})
+        _bt_state["last_error"] = None
+        print(f"[Backtest] Done: {meta['data_from']} -> {meta['data_to']}, {meta['sessions']} sessions.")
+    except BaseException as e:      # universe() may sys.exit
+        _bt_state["last_error"] = str(e)
+        print(f"[Backtest] Error: {e}")
+    finally:
+        _bt_state["running"] = False
+        _bt_lock.release()
+    return True
+
+
+def bt_scheduler_loop():
+    while not _bg_stop_event.is_set():
+        try:
+            if backtest_due(datetime.now(IST)):
+                run_backtest_job()
+        except Exception as e:
+            print(f"[Backtest] Scheduler error: {e}")
+        if _bg_stop_event.wait(timeout=300):
+            break
+
+
+def backtest_info() -> Dict[str, Any]:
+    return {**read_bt_meta(), "running": _bt_state["running"], "last_error": _bt_state["last_error"]}
+
+
 @app.on_event("startup")
 def startup_event():
     global _bg_thread
     _bg_stop_event.clear()
     _bg_thread = threading.Thread(target=bg_scanner_loop, daemon=True)
     _bg_thread.start()
+    threading.Thread(target=bt_scheduler_loop, daemon=True).start()
 
 
 @app.on_event("shutdown")
@@ -544,9 +614,11 @@ def get_backtest(tf: int = Query(5)):
         raise HTTPException(status_code=400, detail=f"Invalid timeframe. Must be one of {TFS}")
 
     csv_path = os.path.join(HERE, f"backtest_tf{tf}.csv")
-    if not os.path.exists(csv_path):
-        raise HTTPException(status_code=404, detail=f"Backtest file for tf {tf} not found.")
-
+    if not os.path.exists(csv_path) or os.path.getsize(csv_path) == 0:
+        if _bt_state["running"] or not run_backtest_job():
+            raise HTTPException(status_code=503, detail="Backtest is being generated. Try again in a minute.")
+        if not os.path.exists(csv_path):
+            raise HTTPException(status_code=500, detail=f"Failed to generate backtest: {_bt_state['last_error']}")
     df = pd.read_csv(csv_path)
     total_signals = len(df)
     cancelled = int((df.status == "CANCELLED").sum())
@@ -554,7 +626,7 @@ def get_backtest(tf: int = Query(5)):
     trades_count = len(tr)
 
     if tr.empty:
-        return {"summary": {}, "equity_curve": [], "trades": []}
+        return {"summary": {}, "equity_curve": [], "trades": [], "meta": backtest_info()}
 
     tr = tr.sort_values(["date", "entry_time"])
     tr["cum_net_R"] = tr.net_R.cumsum()
@@ -656,8 +728,27 @@ def get_backtest(tf: int = Query(5)):
         },
         "equity_curve": equity_curve,
         "by_symbol": sorted_syms,
-        "trades": trades_list
+        "trades": trades_list,
+        "meta": backtest_info()
     }
+
+
+@app.get("/api/backtest/status")
+def get_backtest_status():
+    return backtest_info()
+
+
+@app.post("/api/backtest/refresh")
+def refresh_backtest():
+    if _bt_state["running"]:
+        raise HTTPException(status_code=409, detail="Backtest refresh already in progress.")
+    _bt_state["running"] = True     # visible to the next status poll before the thread starts
+    def job():
+        _bt_state["last_error"] = None
+        if not run_backtest_job():
+            _bt_state["running"] = False
+    threading.Thread(target=job, daemon=True).start()
+    return backtest_info()
 
 
 @app.get("/api/stock/{symbol}")
