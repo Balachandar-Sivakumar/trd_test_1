@@ -123,3 +123,6 @@ if __name__ == "__main__":
         print("  download failed:", f)
     for tf, t in results.items():
         report(t, tf)
+        for trig in ("BREAKOUT", "REVERSAL"):
+            print(f"      {trig:<8}", end=" ")
+            report(t[t.trigger == trig], tf)

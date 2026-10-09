@@ -247,6 +247,8 @@ export default function LiveSignals({ signals, waits, onSelectStock }) {
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
           {filteredSignals.map((item, idx) => {
             const isBuy = item.side === 'BUY';
+            const isRev = item.trigger === 'REVERSAL';
+            const rr = isRev ? 1.2 : 2;
             const isExpanded = expandedId === idx;
             const netR = item.net_R;
             const isWin = (netR || 0) > 0;
@@ -303,7 +305,7 @@ export default function LiveSignals({ signals, waits, onSelectStock }) {
                     <span className="font-semibold text-rose-400">₹{item.stop?.toLocaleString('en-IN')}</span>
                   </div>
                   <div>
-                    <span className="text-[10px] text-emerald-400 block uppercase">Target (+2R)</span>
+                    <span className="text-[10px] text-emerald-400 block uppercase">Target (+{rr}R)</span>
                     <span className="font-semibold text-emerald-400">₹{item.target?.toLocaleString('en-IN')}</span>
                   </div>
                 </div>
@@ -313,11 +315,11 @@ export default function LiveSignals({ signals, waits, onSelectStock }) {
                   <div className="flex justify-between text-[10px] font-mono text-slate-400 mb-1">
                     <span>Stop (-1R)</span>
                     <span>Entry (0R)</span>
-                    <span>Target (+2R)</span>
+                    <span>Target (+{rr}R)</span>
                   </div>
                   <div className="h-2 bg-slate-800 rounded-full overflow-hidden relative flex">
-                    <div className="w-1/3 bg-rose-500/40 border-r border-slate-700" />
-                    <div className="w-2/3 bg-emerald-500/40" />
+                    <div className="bg-rose-500/40 border-r border-slate-700" style={{ width: `${100 / (1 + rr)}%` }} />
+                    <div className="bg-emerald-500/40" style={{ width: `${100 * rr / (1 + rr)}%` }} />
                     {/* Fill marker if hit */}
                     {item.status === 'TARGET HIT' && (
                       <div className="absolute inset-y-0 right-0 w-3 bg-emerald-400 rounded-r shadow-sm" />
@@ -348,7 +350,7 @@ export default function LiveSignals({ signals, waits, onSelectStock }) {
                   onClick={() => setExpandedId(isExpanded ? null : idx)}
                   className="w-full mt-2 pt-2 text-[11px] text-slate-500 hover:text-slate-300 flex items-center justify-center gap-1 transition-colors"
                 >
-                  <span>Breakout Criteria Checklist</span>
+                  <span>Signal Criteria Checklist</span>
                   {isExpanded ? <ChevronUp className="h-3 w-3" /> : <ChevronDown className="h-3 w-3" />}
                 </button>
 
@@ -360,17 +362,26 @@ export default function LiveSignals({ signals, waits, onSelectStock }) {
                       <span className="font-mono text-emerald-400 font-semibold">{item.opening_rvol}x</span>
                     </div>
                     <div className="flex items-center justify-between text-slate-300">
-                      <span>✓ Signal Candle ToD RVOL (≥ 2.0x)</span>
+                      <span>✓ Signal Candle ToD RVOL (≥ {isRev ? '1.5' : '2.0'}x)</span>
                       <span className="font-mono text-emerald-400 font-semibold">{item.tod_rvol}x</span>
                     </div>
+                    {isRev ? (
+                      <div className="flex items-center justify-between text-slate-300">
+                        <span>✓ Noise Band Reversal</span>
+                        <span className="font-mono text-slate-300">
+                          {isBuy ? 'Down-day bounced 1.5%+, higher low' : 'Up-day faded 1.5%+, lower high'}
+                        </span>
+                      </div>
+                    ) : (
+                      <div className="flex items-center justify-between text-slate-300">
+                        <span>✓ Noise Band Breakout</span>
+                        <span className="font-mono text-slate-300">
+                          {isBuy ? `Close > Upper ₹${item.upper}` : `Close < Lower ₹${item.lower}`}
+                        </span>
+                      </div>
+                    )}
                     <div className="flex items-center justify-between text-slate-300">
-                      <span>✓ Noise Band Breakout</span>
-                      <span className="font-mono text-slate-300">
-                        {isBuy ? `Close > Upper ₹${item.upper}` : `Close < Lower ₹${item.lower}`}
-                      </span>
-                    </div>
-                    <div className="flex items-center justify-between text-slate-300">
-                      <span>✓ VWAP Trend Alignment</span>
+                      <span>✓ {isRev ? `3 Closes ${isBuy ? 'Above' : 'Below'} VWAP` : 'VWAP Trend Alignment'}</span>
                       <span className="font-mono text-slate-300">VWAP ₹{item.vwap}</span>
                     </div>
                     <div className="flex items-center justify-between text-slate-300">

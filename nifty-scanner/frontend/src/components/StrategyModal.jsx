@@ -121,6 +121,23 @@ export default function StrategyModal({ onClose }) {
               </div>
             </div>
           </div>
+
+          {/* Step 5: Reversal trigger */}
+          <div className="bg-slate-900/60 border border-slate-800 rounded-xl p-4">
+            <h3 className="text-sm font-bold text-amber-400 flex items-center gap-2 mb-2">
+              <span className="h-5 w-5 rounded-full bg-amber-500/20 text-amber-400 flex items-center justify-center text-xs">5</span>
+              Noise Band Reversal (alternative to the band check)
+            </h3>
+            <p className="text-slate-400 mb-2">
+              The band check also passes when a strong day turns back: a SELL fires on a stock that rallied and then failed, even while price is still above the lower band. All other checks (candle colour, VWAP, EMA 9/21) still apply. After a trade exits, scanning continues, so a failed BUY can be followed by a SELL.
+            </p>
+            <div className="bg-slate-950 p-2.5 rounded-lg border border-slate-800 font-mono text-[11px] text-amber-300 space-y-1">
+              <div>SELL: Session High ≥ Prev Close × 1.02, Close ≤ High × 0.985</div>
+              <div>Last 3 closes &lt; VWAP, lower high · ToD RVOL ≥ 1.5x · from 11:00 IST</div>
+              <div>Stop: min(swing high, VWAP + 0.1 ATR) · Target: 1.2R</div>
+              <div>Max 1 breakout + 1 reversal trade per stock per day</div>
+            </div>
+          </div>
         </div>
 
         {/* Footer */}

@@ -65,6 +65,17 @@ def clean_float(val: Any, nd: int = 2) -> Optional[float]:
         return None
 
 
+def load_industry_map() -> Dict[str, str]:
+    """Load symbol -> industry mapping from nifty50.csv."""
+    p = os.path.join(HERE, "nifty50.csv")
+    if os.path.exists(p):
+        try:
+            return {r["Symbol"].strip(): r.get("Industry", "Equities").strip() for r in csv.DictReader(open(p))}
+        except Exception:
+            pass
+    return {}
+
+
 class TimeframeRequest(BaseModel):
     tf: int
 
@@ -243,6 +254,7 @@ def execute_scan(tf: int, force_live: bool = False) -> Dict[str, Any]:
                 for r in recs:
                     signals_list.append({
                         "symbol": s,
+                        "trigger": r["trigger"],
                         "side": r["side"],
                         "signal_candle": r["signal_candle"].strftime("%H:%M"),
                         "entry": clean_float(r["entry"]),
@@ -303,7 +315,7 @@ def execute_scan(tf: int, force_live: bool = False) -> Dict[str, Any]:
             # 6. Save to logs
             os.makedirs(os.path.join(HERE, "logs"), exist_ok=True)
             path = os.path.join(HERE, "logs", f"{scan_date}_tf{tf}.csv")
-            cols = ["timestamp", "symbol", "side", "signal_candle", "entry", "stop", "target", "atr", "tod_rvol",
+            cols = ["timestamp", "symbol", "trigger", "side", "signal_candle", "entry", "stop", "target", "atr", "tod_rvol",
                     "opening_rvol", "vwap", "ema9", "ema21", "status", "entry_time", "exit_time", "exit_price",
                     "gross_R", "cost", "net_R"]
             with open(path, "w", newline="") as f:
@@ -311,7 +323,7 @@ def execute_scan(tf: int, force_live: bool = False) -> Dict[str, Any]:
                 w.writerow(cols)
                 for r in signals_list:
                     w.writerow([
-                        f"{now:%Y-%m-%d %H:%M:%S}", r["symbol"], r["side"], r["signal_candle"],
+                        f"{now:%Y-%m-%d %H:%M:%S}", r["symbol"], r["trigger"], r["side"], r["signal_candle"],
                         r["entry"], r["stop"], r["target"], r["atr"], r["tod_rvol"],
                         r["opening_rvol"], r["vwap"], r["ema9"], r["ema21"], r["status"],
                         r["entry_time"] or "", r["exit_time"] or "",
@@ -362,6 +374,7 @@ def load_from_log_cache(tf: int) -> Optional[Dict[str, Any]]:
 
             signals.append({
                 "symbol": sym,
+                "trigger": str(row.get("trigger", "BREAKOUT")) if pd.notna(row.get("trigger")) else "BREAKOUT",
                 "side": str(row["side"]),
                 "signal_candle": str(row["signal_candle"]),
                 "entry": round(float(row["entry"]), 2),
@@ -662,6 +675,7 @@ def get_backtest(tf: int = Query(5)):
             "trade": i,
             "date": row["date"],
             "symbol": row["sym"],
+            "trigger": row.get("trigger", "BREAKOUT"),
             "side": row["side"],
             "net_R": round(float(row["net_R"]), 2),
             "cum_R": round(float(row["cum_net_R"]), 2),
@@ -686,6 +700,7 @@ def get_backtest(tf: int = Query(5)):
         trades_list.append({
             "symbol": row["sym"],
             "date": str(row["date"]),
+            "trigger": row.get("trigger", "BREAKOUT"),
             "side": row["side"],
             "signal_candle": str(row["signal_candle"])[:16],
             "entry": round(float(row["entry"]), 2),

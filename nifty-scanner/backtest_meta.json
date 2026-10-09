@@ -1,10 +1,10 @@
 {
-  "updated_at": "2026-10-08 07:35:42",
+  "updated_at": "2026-10-09 14:24:04",
   "data_from": "2026-07-16",
-  "data_to": "2026-10-07",
-  "sessions": 58,
+  "data_to": "2026-10-08",
+  "sessions": 59,
   "symbols": 50,
   "universe_source": "NSE (live)",
   "failed": [],
-  "session_target": "2026-10-07"
+  "session_target": "2026-10-08"
 }

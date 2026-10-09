@@ -1,4 +1,4 @@
-"""Live Nifty 50 scanner — In-Play Noise Breakout.
+"""Live Nifty 50 scanner — In-Play Noise Breakout + Reversal.
 
     python3 scanner.py                 # one scan, 5-min candles
     python3 scanner.py --tf 15         # one scan, 15-min candles
@@ -95,9 +95,11 @@ def explain(sym, orv, r, tf):
     return "\n".join([
         f"  {sym} — {r['side']}  (signal candle {r['signal_candle']:%H:%M}, {tf}-min)",
         f"    ✓ Top-10 In-Play          Opening RVOL = {orv:.2f}x",
-        f"    ✓ ToD RVOL >= 2.0         {r['tod_rvol']:.2f}x",
+        f"    ✓ ToD RVOL >= {'2.0' if r['trigger'] == 'BREAKOUT' else '1.5'}         {r['tod_rvol']:.2f}x",
         f"    ✓ {'Green' if side == 1 else 'Red'} candle",
-        f"    ✓ Close {word} noise band  close {fmt(r['close'])} vs band {fmt(band)}",
+        (f"    ✓ Close {word} noise band  close {fmt(r['close'])} vs band {fmt(band)}"
+         if r["trigger"] == "BREAKOUT" else
+         f"    ✓ Reversal                {'down-day bounced 1.5%+ off the low, higher low' if side == 1 else 'up-day faded 1.5%+ off the high, lower high'}, 3 closes {word} VWAP"),
         f"    ✓ Close {word} VWAP        VWAP {fmt(r['vwap'])}",
         f"    ✓ EMA 9 {'>' if side == 1 else '<'} EMA 21          {fmt(r['ema9'])} vs {fmt(r['ema21'])}",
         f"    Entry {fmt(r['entry'])} | Stop {fmt(r['stop'])} | Target {fmt(r['target'])} | "
@@ -197,11 +199,17 @@ def scan(tf):
         else:
             lg, sh = checks(last, P)
             hm_now = now.hour * 100 + now.minute
-            why = ("no candle met all conditions between 09:45 and 14:30" if hm_now > P["end"] else
-                   "signal window opens at 09:45" if not lg["window"] else
-                   f"last candle {last.name:%H:%M}: ToD RVOL {last.tod_rvol:.2f}x {tick(lg['rvol'])}, "
-                   f"close {fmt(last.close)} vs bands {fmt(last.lower)}/{fmt(last.upper)} "
-                   f"{tick(lg['band'] or sh['band'])}")
+            if hm_now > P["end"]:
+                why = "no candle met all conditions between 09:45 and 14:30"
+            elif not lg["window"]:
+                why = "signal window opens at 09:45"
+            else:
+                reasons = []
+                if not (lg["rvol"] or sh["rvol"]):
+                    reasons.append(f"ToD RVOL {last.tod_rvol:.2f}x (< 2.0x)")
+                if not (lg["band"] or sh["band"]):
+                    reasons.append(f"inside bands {fmt(last.lower)}/{fmt(last.upper)}")
+                why = f"last candle {last.name:%H:%M}: " + (", ".join(reasons) if reasons else "conditions not met")
             waits[s] = (last, why)
 
     # table
@@ -209,18 +217,18 @@ def scan(tf):
     for s, (recs, last) in results.items():
         for r in recs:
             rows.append((s, r, last))
-    hdr = f"{'TIME':5} | {'STOCK':<11} | {'SIDE':4} | {'SIGNAL':<6} | {'ENTRY':>10} | {'STOP':>10} | " \
+    hdr = f"{'TIME':5} | {'STOCK':<11} | {'SIDE':4} | {'TRIGGER':<8} | {'ENTRY':>10} | {'STOP':>10} | " \
           f"{'TARGET':>10} | {'RISK':>6} | {'CURRENT':>10} | STATUS"
     print(f"\nLIVE TABLE ({tf}-min candles; TIME = signal candle start)")
     print(hdr)
     print("-" * len(hdr))
     for s, r, last in rows:
-        print(f"{r['signal_candle']:%H:%M} | {s:<11} | {r['side']:4} | {'VALID':<6} | {fmt(r['entry']):>10} | "
+        print(f"{r['signal_candle']:%H:%M} | {s:<11} | {r['side']:4} | {r['trigger']:<8} | {fmt(r['entry']):>10} | "
               f"{fmt(r['stop']):>10} | {fmt(r['target']):>10} | {r['risk_pct']:5.2f}% | {fmt(last.close):>10} | "
               f"{label(r)}")
     for s, (last, why) in waits.items():
         cur = fmt(last.close) if last is not None else "-"
-        print(f"{'':5} | {s:<11} | WAIT | {'-':<6} | {'':>10} | {'':>10} | {'':>10} | {'':>6} | {cur:>10} | "
+        print(f"{'':5} | {s:<11} | WAIT | {'-':<8} | {'':>10} | {'':>10} | {'':>10} | {'':>6} | {cur:>10} | "
               f"No valid breakout")
 
     def section(title, pred):
@@ -244,7 +252,7 @@ def scan(tf):
                 print(explain(s, rank[s], r, tf))
             else:
                 extra = f" | {r['gross_R']:+.2f}R gross / {r['net_R']:+.2f}R net" if r["gross_R"] is not None else ""
-                print(f"  {s:<11} {r['side']:4} signal {r['signal_candle']:%H:%M} | entry {fmt(r['entry'])} "
+                print(f"  {s:<11} {r['side']:4} {r['trigger']:<8} signal {r['signal_candle']:%H:%M} | entry {fmt(r['entry'])} "
                       f"stop {fmt(r['stop'])} target {fmt(r['target'])}{extra}")
     print(f"\nH) STOCKS WITH NO SIGNAL (in top 10): {len(waits)}")
     for s, (last, why) in waits.items():
@@ -276,14 +284,14 @@ def scan(tf):
     # log
     os.makedirs(os.path.join(HERE, "logs"), exist_ok=True)
     path = os.path.join(HERE, "logs", f"{today}_tf{tf}.csv")
-    cols = ["timestamp", "symbol", "side", "signal_candle", "entry", "stop", "target", "atr", "tod_rvol",
+    cols = ["timestamp", "symbol", "trigger", "side", "signal_candle", "entry", "stop", "target", "atr", "tod_rvol",
             "opening_rvol", "vwap", "ema9", "ema21", "status", "entry_time", "exit_time", "exit_price",
             "gross_R", "cost", "net_R"]
     with open(path, "w", newline="") as f:
         w = csv.writer(f)
         w.writerow(cols)
         for s, r, _ in rows:
-            w.writerow([f"{now:%Y-%m-%d %H:%M:%S}", s, r["side"], f"{r['signal_candle']:%H:%M}",
+            w.writerow([f"{now:%Y-%m-%d %H:%M:%S}", s, r["trigger"], r["side"], f"{r['signal_candle']:%H:%M}",
                         *(round(r[k], 2) for k in ("entry", "stop", "target", "atr", "tod_rvol")),
                         round(rank[s], 2), *(round(r[k], 2) for k in ("vwap", "ema9", "ema21")), r["status"],
                         f"{r['entry_time']:%H:%M}" if r["entry_time"] is not None else "",
