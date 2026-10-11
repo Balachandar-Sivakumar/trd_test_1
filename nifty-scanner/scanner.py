@@ -1,4 +1,4 @@
-"""Live Nifty 50 scanner — In-Play Noise Breakout + Reversal.
+"""Live Nifty 50 scanner — In-Play Noise Breakout.
 
     python3 scanner.py                 # one scan, 5-min candles
     python3 scanner.py --tf 15         # one scan, 15-min candles
@@ -31,6 +31,7 @@ UA = {"User-Agent": "Mozilla/5.0"}
 NSE_LIST = "https://archives.nseindia.com/content/indices/ind_nifty50list.csv"
 STALE_MIN = 12          # a symbol is stale if its last completed 5-min candle is older than this
 MAX_STALE = 5           # abort the scan if more symbols than this are stale/missing
+NIFTY = "^NSEI"         # index for the BUY market filter
 
 
 def get(url, timeout=20, tries=4):
@@ -58,8 +59,13 @@ def universe():
     sys.exit("Could not load the Nifty 50 constituent list from NSE and no cached copy exists.")
 
 
+def ticker(sym):
+    """Yahoo ticker: NSE stocks get .NS, indices such as ^NSEI are used as-is."""
+    return sym if sym.startswith("^") else f"{sym}.NS"
+
+
 def fetch_5m(sym):
-    url = (f"https://query2.finance.yahoo.com/v8/finance/chart/{urllib.parse.quote(sym)}.NS"
+    url = (f"https://query2.finance.yahoo.com/v8/finance/chart/{urllib.parse.quote(ticker(sym))}"
            f"?interval=5m&range=1mo")
     d = json.loads(get(url))["chart"]["result"][0]
     q = d["indicators"]["quote"][0]
@@ -95,13 +101,12 @@ def explain(sym, orv, r, tf):
     return "\n".join([
         f"  {sym} — {r['side']}  (signal candle {r['signal_candle']:%H:%M}, {tf}-min)",
         f"    ✓ Top-10 In-Play          Opening RVOL = {orv:.2f}x",
-        f"    ✓ ToD RVOL >= {'2.0' if r['trigger'] == 'BREAKOUT' else '1.5'}         {r['tod_rvol']:.2f}x",
+        f"    ✓ ToD RVOL >= 2.0         {r['tod_rvol']:.2f}x",
         f"    ✓ {'Green' if side == 1 else 'Red'} candle",
-        (f"    ✓ Close {word} noise band  close {fmt(r['close'])} vs band {fmt(band)}"
-         if r["trigger"] == "BREAKOUT" else
-         f"    ✓ Reversal                {'down-day bounced 1.5%+ off the low, higher low' if side == 1 else 'up-day faded 1.5%+ off the high, lower high'}, 3 closes {word} VWAP"),
+        f"    ✓ Close {word} noise band  close {fmt(r['close'])} vs band {fmt(band)}",
         f"    ✓ Close {word} VWAP        VWAP {fmt(r['vwap'])}",
         f"    ✓ EMA 9 {'>' if side == 1 else '<'} EMA 21          {fmt(r['ema9'])} vs {fmt(r['ema21'])}",
+        *([f"    ✓ NIFTY above day open    (market filter)"] if side == 1 else []),
         f"    Entry {fmt(r['entry'])} | Stop {fmt(r['stop'])} | Target {fmt(r['target'])} | "
         f"Risk {fmt(r['risk'])} ({r['risk_pct']:.2f}%) | ATR {fmt(r['atr'])}",
         f"    Status = {label(r)}",
@@ -136,6 +141,12 @@ def scan(tf):
         return
 
     raw = load_all(syms)
+    nifty = None
+    try:
+        nifty = session(fetch_5m(NIFTY))
+        nifty = nifty[nifty.index + timedelta(minutes=5) <= now]
+    except Exception as e:
+        print(f"NIFTY download failed ({e}) — market filter will block all BUY signals this scan.")
     today = now.date()
     data, problems = {}, []
     for s, df, err in raw:
@@ -185,7 +196,7 @@ def scan(tf):
     results, waits = {}, {}
     for s in top:
         df5, exit_open, last_end = data[s]
-        bars = build(df5, tf, P)
+        bars = build(df5, tf, P, nifty)
         bars = bars[bars.index + timedelta(minutes=tf) <= last_end]   # completed tf candles only
         day = bars[bars.date == today]
         if day.empty:
@@ -209,6 +220,8 @@ def scan(tf):
                     reasons.append(f"ToD RVOL {last.tod_rvol:.2f}x (< 2.0x)")
                 if not (lg["band"] or sh["band"]):
                     reasons.append(f"inside bands {fmt(last.lower)}/{fmt(last.upper)}")
+                if lg["band"] and not lg["market"]:
+                    reasons.append("BUY blocked: NIFTY below day open")
                 why = f"last candle {last.name:%H:%M}: " + (", ".join(reasons) if reasons else "conditions not met")
             waits[s] = (last, why)
 
@@ -217,18 +230,18 @@ def scan(tf):
     for s, (recs, last) in results.items():
         for r in recs:
             rows.append((s, r, last))
-    hdr = f"{'TIME':5} | {'STOCK':<11} | {'SIDE':4} | {'TRIGGER':<8} | {'ENTRY':>10} | {'STOP':>10} | " \
+    hdr = f"{'TIME':5} | {'STOCK':<11} | {'SIDE':4} | {'SIGNAL':<6} | {'ENTRY':>10} | {'STOP':>10} | " \
           f"{'TARGET':>10} | {'RISK':>6} | {'CURRENT':>10} | STATUS"
     print(f"\nLIVE TABLE ({tf}-min candles; TIME = signal candle start)")
     print(hdr)
     print("-" * len(hdr))
     for s, r, last in rows:
-        print(f"{r['signal_candle']:%H:%M} | {s:<11} | {r['side']:4} | {r['trigger']:<8} | {fmt(r['entry']):>10} | "
+        print(f"{r['signal_candle']:%H:%M} | {s:<11} | {r['side']:4} | {'VALID':<6} | {fmt(r['entry']):>10} | "
               f"{fmt(r['stop']):>10} | {fmt(r['target']):>10} | {r['risk_pct']:5.2f}% | {fmt(last.close):>10} | "
               f"{label(r)}")
     for s, (last, why) in waits.items():
         cur = fmt(last.close) if last is not None else "-"
-        print(f"{'':5} | {s:<11} | WAIT | {'-':<8} | {'':>10} | {'':>10} | {'':>10} | {'':>6} | {cur:>10} | "
+        print(f"{'':5} | {s:<11} | WAIT | {'-':<6} | {'':>10} | {'':>10} | {'':>10} | {'':>6} | {cur:>10} | "
               f"No valid breakout")
 
     def section(title, pred):
@@ -252,7 +265,7 @@ def scan(tf):
                 print(explain(s, rank[s], r, tf))
             else:
                 extra = f" | {r['gross_R']:+.2f}R gross / {r['net_R']:+.2f}R net" if r["gross_R"] is not None else ""
-                print(f"  {s:<11} {r['side']:4} {r['trigger']:<8} signal {r['signal_candle']:%H:%M} | entry {fmt(r['entry'])} "
+                print(f"  {s:<11} {r['side']:4} signal {r['signal_candle']:%H:%M} | entry {fmt(r['entry'])} "
                       f"stop {fmt(r['stop'])} target {fmt(r['target'])}{extra}")
     print(f"\nH) STOCKS WITH NO SIGNAL (in top 10): {len(waits)}")
     for s, (last, why) in waits.items():
@@ -284,14 +297,14 @@ def scan(tf):
     # log
     os.makedirs(os.path.join(HERE, "logs"), exist_ok=True)
     path = os.path.join(HERE, "logs", f"{today}_tf{tf}.csv")
-    cols = ["timestamp", "symbol", "trigger", "side", "signal_candle", "entry", "stop", "target", "atr", "tod_rvol",
+    cols = ["timestamp", "symbol", "side", "signal_candle", "entry", "stop", "target", "atr", "tod_rvol",
             "opening_rvol", "vwap", "ema9", "ema21", "status", "entry_time", "exit_time", "exit_price",
             "gross_R", "cost", "net_R"]
     with open(path, "w", newline="") as f:
         w = csv.writer(f)
         w.writerow(cols)
         for s, r, _ in rows:
-            w.writerow([f"{now:%Y-%m-%d %H:%M:%S}", s, r["trigger"], r["side"], f"{r['signal_candle']:%H:%M}",
+            w.writerow([f"{now:%Y-%m-%d %H:%M:%S}", s, r["side"], f"{r['signal_candle']:%H:%M}",
                         *(round(r[k], 2) for k in ("entry", "stop", "target", "atr", "tod_rvol")),
                         round(rank[s], 2), *(round(r[k], 2) for k in ("vwap", "ema9", "ema21")), r["status"],
                         f"{r['entry_time']:%H:%M}" if r["entry_time"] is not None else "",

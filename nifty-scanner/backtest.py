@@ -10,7 +10,7 @@ import argparse, json, os, time, urllib.parse
 from datetime import datetime
 import numpy as np, pandas as pd
 from core import IST, PARAMS, TFS, build, hhmm, opening_rvol, run_day, session
-from scanner import get, universe
+from scanner import NIFTY, get, ticker, universe
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 BT_DIR = os.path.join(HERE, "data", "bt")      # kept apart from the live scan's 1-month cache in data/
@@ -20,7 +20,7 @@ SESSION_DONE = 1545     # HHMM IST after which today's session counts as complet
 
 def fetch_60d(s):
     d = json.loads(get(f"https://query2.finance.yahoo.com/v8/finance/chart/"
-                       f"{urllib.parse.quote(s)}.NS?interval=5m&range=60d"))["chart"]["result"][0]
+                       f"{urllib.parse.quote(ticker(s))}?interval=5m&range=60d"))["chart"]["result"][0]
     q = d["indicators"]["quote"][0]
     df = pd.DataFrame({k: q[k] for k in ["open", "high", "low", "close", "volume"]},
                       index=pd.to_datetime(d["timestamp"], unit="s", utc=True).tz_convert(IST)).dropna()
@@ -39,12 +39,12 @@ def complete_sessions(df, now):
 
 
 def load(syms, refresh):
-    """Returns ({sym: 5-min df}, [symbols whose download failed])."""
+    """Returns ({sym: 5-min df}, [symbols whose download failed]). NIFTY is cached as NIFTY_INDEX."""
     os.makedirs(BT_DIR, exist_ok=True)
     now = datetime.now(IST)
     out, failed = {}, []
     for s in syms:
-        p = os.path.join(BT_DIR, f"{s}.pkl")
+        p = os.path.join(BT_DIR, "NIFTY_INDEX.pkl" if s == NIFTY else f"{s}.pkl")
         old = pd.read_pickle(p).tz_convert(IST) if os.path.exists(p) else None
         df = old
         if refresh or old is None or time.time() - os.path.getmtime(p) > 12 * 3600:
@@ -60,12 +60,12 @@ def load(syms, refresh):
     return out, failed
 
 
-def backtest(data, tf, P=PARAMS):
+def backtest(data, tf, P=PARAMS, nifty=None):
     orv = pd.DataFrame({s: opening_rvol(df, P) for s, df in data.items()})
     top = {d: set(r.dropna().sort_values(ascending=False).head(P["top_n"]).index) for d, r in orv.iterrows()}
     rows = []
     for s, df in data.items():
-        bars = build(df, tf, P)
+        bars = build(df, tf, P, nifty)
         for d, day in bars.groupby("date"):
             if s not in top.get(d, ()):
                 continue
@@ -77,12 +77,15 @@ def backtest(data, tf, P=PARAMS):
 def run_all(refresh=True, tfs=TFS, extra=None):
     """Refresh data, re-run every timeframe, write backtest_tf*.csv and backtest_meta.json."""
     syms, src = universe()
-    data, failed = load(syms, refresh)
+    data, failed = load(syms + [NIFTY], refresh)
+    nifty = data.pop(NIFTY, None)
+    if nifty is None:
+        failed.append("NIFTY index missing — market filter blocks every BUY in this backtest")
     if not data:
         raise RuntimeError("no backtest data available: " + "; ".join(failed[:5]))
     results = {}
     for tf in tfs:
-        t = backtest(data, tf)
+        t = backtest(data, tf, nifty=nifty)
         path = os.path.join(HERE, f"backtest_tf{tf}.csv")
         t.to_csv(path + ".tmp", index=False)
         os.replace(path + ".tmp", path)      # the API never reads a half-written file
@@ -123,6 +126,3 @@ if __name__ == "__main__":
         print("  download failed:", f)
     for tf, t in results.items():
         report(t, tf)
-        for trig in ("BREAKOUT", "REVERSAL"):
-            print(f"      {trig:<8}", end=" ")
-            report(t[t.trigger == trig], tf)

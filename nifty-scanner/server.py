@@ -26,7 +26,7 @@ import numpy as np
 import pandas as pd
 
 from core import IST, PARAMS, TFS, build, checks, hhmm, opening_rvol, run_day, session
-from scanner import universe, fetch_5m, load_all, read_tf, HERE
+from scanner import NIFTY, universe, fetch_5m, load_all, read_tf, HERE
 from backtest import META as BT_META, SESSION_DONE, run_all as run_backtest_all
 
 app = FastAPI(title="NIFTY 50 Breakout Scanner API", version="1.1.0")
@@ -140,6 +140,19 @@ def execute_scan(tf: int, force_live: bool = False) -> Dict[str, Any]:
             
             os.makedirs(os.path.join(HERE, "data"), exist_ok=True)
 
+            # NIFTY 50 index for the BUY market filter (cached copy if the download fails)
+            nifty_pkl = os.path.join(HERE, "data", "NIFTY_INDEX.pkl")
+            try:
+                nifty = fetch_5m(NIFTY)
+                nifty.to_pickle(nifty_pkl)
+            except Exception as e:
+                nifty = pd.read_pickle(nifty_pkl) if os.path.exists(nifty_pkl) else None
+                problems.append(f"NIFTY: download failed ({e})" + ("" if nifty is not None else
+                                " — market filter blocks every BUY"))
+            if nifty is not None:
+                nifty = session(nifty)
+                nifty = nifty[nifty.index + timedelta(minutes=5) <= now]
+
             for s, df, err in raw:
                 # If live download fails, fallback to local pkl if available
                 pkl_file = os.path.join(HERE, "data", f"{s}.pkl")
@@ -215,7 +228,7 @@ def execute_scan(tf: int, force_live: bool = False) -> Dict[str, Any]:
             waits = []
             for s in top:
                 df5, exit_open, last_end, _ = data[s]
-                bars = build(df5, tf, P)
+                bars = build(df5, tf, P, nifty)
                 bars = bars[bars.index + timedelta(minutes=tf) <= last_end]
                 day = bars[bars.date == scan_date]
                 if day.empty:
@@ -241,6 +254,8 @@ def execute_scan(tf: int, force_live: bool = False) -> Dict[str, Any]:
                             conds.append(f"ToD RVOL {last.tod_rvol:.2f}x (< 2.0x)")
                         if not (lg['band'] or sh['band']):
                             conds.append(f"Inside noise band ({last.lower:.2f} - {last.upper:.2f})")
+                        if lg['band'] and not lg['market']:
+                            conds.append("BUY blocked: NIFTY below day open")
                         why = "Waiting: " + (", ".join(conds) if conds else "Conditions not met")
                     waits.append({
                         "symbol": s,
@@ -254,7 +269,6 @@ def execute_scan(tf: int, force_live: bool = False) -> Dict[str, Any]:
                 for r in recs:
                     signals_list.append({
                         "symbol": s,
-                        "trigger": r["trigger"],
                         "side": r["side"],
                         "signal_candle": r["signal_candle"].strftime("%H:%M"),
                         "entry": clean_float(r["entry"]),
@@ -315,7 +329,7 @@ def execute_scan(tf: int, force_live: bool = False) -> Dict[str, Any]:
             # 6. Save to logs
             os.makedirs(os.path.join(HERE, "logs"), exist_ok=True)
             path = os.path.join(HERE, "logs", f"{scan_date}_tf{tf}.csv")
-            cols = ["timestamp", "symbol", "trigger", "side", "signal_candle", "entry", "stop", "target", "atr", "tod_rvol",
+            cols = ["timestamp", "symbol", "side", "signal_candle", "entry", "stop", "target", "atr", "tod_rvol",
                     "opening_rvol", "vwap", "ema9", "ema21", "status", "entry_time", "exit_time", "exit_price",
                     "gross_R", "cost", "net_R"]
             with open(path, "w", newline="") as f:
@@ -323,7 +337,7 @@ def execute_scan(tf: int, force_live: bool = False) -> Dict[str, Any]:
                 w.writerow(cols)
                 for r in signals_list:
                     w.writerow([
-                        f"{now:%Y-%m-%d %H:%M:%S}", r["symbol"], r["trigger"], r["side"], r["signal_candle"],
+                        f"{now:%Y-%m-%d %H:%M:%S}", r["symbol"], r["side"], r["signal_candle"],
                         r["entry"], r["stop"], r["target"], r["atr"], r["tod_rvol"],
                         r["opening_rvol"], r["vwap"], r["ema9"], r["ema21"], r["status"],
                         r["entry_time"] or "", r["exit_time"] or "",
@@ -374,7 +388,6 @@ def load_from_log_cache(tf: int) -> Optional[Dict[str, Any]]:
 
             signals.append({
                 "symbol": sym,
-                "trigger": str(row.get("trigger", "BREAKOUT")) if pd.notna(row.get("trigger")) else "BREAKOUT",
                 "side": str(row["side"]),
                 "signal_candle": str(row["signal_candle"]),
                 "entry": round(float(row["entry"]), 2),
@@ -675,7 +688,6 @@ def get_backtest(tf: int = Query(5)):
             "trade": i,
             "date": row["date"],
             "symbol": row["sym"],
-            "trigger": row.get("trigger", "BREAKOUT"),
             "side": row["side"],
             "net_R": round(float(row["net_R"]), 2),
             "cum_R": round(float(row["cum_net_R"]), 2),
@@ -700,7 +712,6 @@ def get_backtest(tf: int = Query(5)):
         trades_list.append({
             "symbol": row["sym"],
             "date": str(row["date"]),
-            "trigger": row.get("trigger", "BREAKOUT"),
             "side": row["side"],
             "signal_candle": str(row["signal_candle"])[:16],
             "entry": round(float(row["entry"]), 2),
